@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Klippy Log</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; background: #121212; color: #d0d0d0;
+         font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px;
+           background: #1e1e1e; border-bottom: 1px solid #333; font-family: system-ui, sans-serif; font-size: 13px; }
+  header strong { font-size: 14px; }
+  #state { margin-right: auto; color: #888; }
+  #state.live::before { content: "\25CF  "; color: #4caf50; }
+  #state.paused::before { content: "\25CF  "; color: #ffb300; }
+  #state.error::before { content: "\25CF  "; color: #f44336; }
+  button, input { background: #2a2a2a; color: inherit; border: 1px solid #444; border-radius: 4px;
+           padding: 4px 10px; font: inherit; text-decoration: none; }
+  button:hover { background: #353535; cursor: pointer; }
+  input { width: 180px; }
+  nav { display: flex; gap: 12px; padding-left: 12px; border-left: 1px solid #444; }
+  nav a { color: #64b5f6; text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  /* Embedded in Mainsail: its sidebar does the navigation */
+  .embedded nav { display: none; }
+  label { display: flex; align-items: center; gap: 4px; color: #aaa; }
+  #log { flex: 1; overflow: auto; margin: 0; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }
+  #log div.err  { color: #ff6b6b; }
+  #log div.warn { color: #ffca28; }
+  #log div.mark { color: #64b5f6; border-top: 1px dashed #345; margin-top: 4px; padding-top: 4px; }
+  #log div.hide { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Klippy Log</strong>
+  <span id="state">connecting …</span>
+  <input id="filter" type="search" placeholder="Filter" autocomplete="off">
+  <label><input id="follow" type="checkbox" checked style="width:auto"> follow</label>
+  <button id="pause">Pause</button>
+  <button id="clear">Clear</button>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/console">Console</a>
+    <a href="/files">Files</a>
+    <a href="/config">Machine</a>
+  </nav>
+</header>
+<div id="log"></div>
+<script>
+(function () {
+  "use strict";
+
+  if (window.self !== window.top) document.documentElement.classList.add("embedded");
+
+  // Same origin: Mainsail's web server proxies /server/* to Moonraker,
+  // which serves /tmp/gklib.log as klippy.log and supports byte ranges.
+  var URL_LOG = "/server/files/klippy.log";
+  var POLL_MS = 2000;        // poll interval
+  var INITIAL_BYTES = 65536; // how much history to load on open
+  var MAX_LINES = 5000;      // lines kept in the page
+
+  var logEl = document.getElementById("log");
+  var stateEl = document.getElementById("state");
+  var filterEl = document.getElementById("filter");
+  var followEl = document.getElementById("follow");
+  var pauseEl = document.getElementById("pause");
+
+  var offset = null;   // next byte to request; null = not initialised
+  var partial = "";    // incomplete last line
+  var decoder = new TextDecoder("utf-8");
+  var paused = false;
+  var busy = false;
+  var filter = "";
+
+  function setState(cls, text) { stateEl.className = cls; stateEl.textContent = text; }
+
+  function totalFrom(res) {
+    var m = /\/(\d+)\s*$/.exec(res.headers.get("Content-Range") || "");
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function matches(text) { return !filter || text.toLowerCase().indexOf(filter) !== -1; }
+
+  function addLine(text, cls) {
+    var div = document.createElement("div");
+    var c = cls || "";
+    if (!c) {
+      if (/\b(ERROR|FATAL|PANIC)\b|!!/.test(text)) c = "err";
+      else if (/\bWARN(ING)?\b/.test(text)) c = "warn";
+    }
+    if (c !== "mark" && !matches(text)) c += " hide";
+    div.className = c.trim();
+    div.textContent = text;
+    logEl.appendChild(div);
+  }
+
+  function addText(text) {
+    var lines = (partial + text).split("\n");
+    partial = lines.pop();
+    for (var i = 0; i < lines.length; i++) addLine(lines[i].replace(/\r$/, ""));
+    while (logEl.childElementCount > MAX_LINES) logEl.removeChild(logEl.firstChild);
+    if (followEl.checked) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // The printer restarted and began a new log: read it from the start.
+  function restarted() {
+    offset = 0;
+    partial = "";
+    decoder = new TextDecoder("utf-8");
+    addLine("── log restarted (printer restart) ──", "mark");
+  }
+
+  async function poll() {
+    if (paused || busy) return;
+    busy = true;
+    try {
+      var range = offset === null ? "bytes=-" + INITIAL_BYTES : "bytes=" + offset + "-";
+      var res = await fetch(URL_LOG, { headers: { Range: range }, cache: "no-store" });
+
+      if (res.status === 206 || res.status === 200) {
+        // 206 is the requested part. Moonraker answers 200 with the whole file
+        // instead when the range covers all of it: a log shorter than
+        // INITIAL_BYTES on opening, or reading from byte 0 after a restart.
+        var whole = res.status === 200;
+        var buf = await res.arrayBuffer();
+        var total = whole ? buf.byteLength : totalFrom(res);
+        if (whole && offset) {
+          if (buf.byteLength < offset) restarted();
+          buf = buf.slice(offset);
+        }
+        var text = decoder.decode(buf, { stream: true });
+        if (offset === null && !whole) {
+          // A part taken from the end starts in the middle of a line: drop that fragment.
+          var nl = text.indexOf("\n");
+          if (nl !== -1) text = text.slice(nl + 1);
+        }
+        offset = total !== null ? total : (offset || 0) + buf.byteLength;
+        addText(text);
+      } else if (res.status === 416) {
+        // Nothing new, or the log was recreated (printer restart) and is now shorter.
+        var size = totalFrom(res);
+        if (offset === null) offset = size || 0;
+        else if (size !== null && size < offset) restarted();
+      } else {
+        throw new Error("HTTP " + res.status);
+      }
+      setState("live", "live");
+    } catch (e) {
+      setState("error", "no connection (" + e.message + ")");
+    } finally {
+      busy = false;
+    }
+  }
+
+  filterEl.addEventListener("input", function () {
+    filter = filterEl.value.trim().toLowerCase();
+    var rows = logEl.children;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].classList.contains("mark")) continue;
+      rows[i].classList.toggle("hide", !matches(rows[i].textContent));
+    }
+    if (followEl.checked) logEl.scrollTop = logEl.scrollHeight;
+  });
+
+  pauseEl.addEventListener("click", function () {
+    paused = !paused;
+    pauseEl.textContent = paused ? "Resume" : "Pause";
+    if (paused) setState("paused", "paused"); else poll();
+  });
+
+  document.getElementById("clear").addEventListener("click", function () { logEl.textContent = ""; });
+
+  // Scrolling up stops following; scrolling back to the end resumes it.
+  logEl.addEventListener("scroll", function () {
+    followEl.checked = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+  });
+
+  // No polling while the tab is hidden, to keep the printer idle.
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
+  setInterval(function () { if (!document.hidden) poll(); }, POLL_MS);
+  poll();
+})();
+</script>
+</body>
+</html>

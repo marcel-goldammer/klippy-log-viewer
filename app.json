@@ -1,0 +1,13 @@
+{
+    "$version": "1",
+
+    "name": "Klippy Log Viewer",
+    "description": "Live view of the Klippy log in the browser, linked from the Mainsail sidebar. Runs no process of its own.",
+    "version": "1.0",
+
+    "requirements":
+    {
+        "memory": 0,
+        "cpu": 0
+    }
+}
