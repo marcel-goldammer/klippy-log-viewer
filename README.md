@@ -3,6 +3,8 @@
 A small [Rinkhals](https://github.com/jbatonnet/Rinkhals) app that shows the
 Klippy log live in the browser, as a page inside Mainsail.
 
+![The Klippy log shown live inside Mainsail](screenshot.png)
+
 Mainsail only lets you download the log. This app adds a "Klippy Log" entry to
 Mainsail's sidebar that opens a live view at `/klippy-log`, with the sidebar
 and top bar staying where they are.
